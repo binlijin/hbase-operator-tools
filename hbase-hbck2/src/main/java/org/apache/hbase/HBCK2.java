@@ -26,6 +26,7 @@ import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Properties;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -41,6 +42,7 @@ import org.apache.hadoop.hbase.ClusterMetrics;
 import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
@@ -48,13 +50,16 @@ import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Hbck;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.filter.RowFilter;
 import org.apache.hadoop.hbase.filter.SubstringComparator;
 import org.apache.hadoop.hbase.master.RegionState;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 
 import org.apache.logging.log4j.Level;
@@ -70,7 +75,6 @@ import org.apache.hbase.thirdparty.org.apache.commons.cli.Option;
 import org.apache.hbase.thirdparty.org.apache.commons.cli.Options;
 import org.apache.hbase.thirdparty.org.apache.commons.cli.ParseException;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
-
 
 /**
  * HBase fixup tool version 2, for hbase-2.0.0+ clusters.
@@ -96,6 +100,7 @@ public class HBCK2 extends Configured implements org.apache.hadoop.util.Tool {
   private static final String SET_REGION_STATE = "setRegionState";
   private static final String SCHEDULE_RECOVERIES = "scheduleRecoveries";
   private static final String FIX_META = "fixMeta";
+  private static final String SET_TABLE_REGIONS_STATE = "setTableRegionsState";
 
   private static final String ADD_MISSING_REGIONS_IN_META_FOR_TABLES =
     "addFsRegionsMissingInMeta";
@@ -170,6 +175,41 @@ public class HBCK2 extends Configured implements org.apache.hadoop.util.Tool {
       return EXIT_SUCCESS;
     } else {
       System.out.println("ERROR: Could not find region " + region + " in meta.");
+    }
+    return EXIT_FAILURE;
+  }
+
+  int setTableRegionsState(ClusterConnection connection, TableName tableName, RegionState.State newState)
+      throws IOException {
+    if (newState == null) {
+      throw new IllegalArgumentException("State can't be null.");
+    }
+    RegionState.State currentState = null;
+    Table table = connection.getTable(TableName.valueOf("hbase:meta"));
+    Scan scan = MetaTableAccessor.getScanForTableName(connection, tableName);
+    ResultScanner scanner = table.getScanner(scan);
+    for (Result result : scanner) {
+      RegionInfo regionInfo = MetaTableAccessor.getRegionInfo(result);
+      if (regionInfo == null) {
+        continue;
+      }
+      if (!regionInfo.isSplit()) {
+        byte[] currentStateValue =
+            result.getValue(HConstants.CATALOG_FAMILY, HConstants.STATE_QUALIFIER);
+        if (currentStateValue == null) {
+          System.out.println("WARN: Region " + regionInfo + " state info on meta was NULL");
+        } else {
+          currentState = RegionState.State
+              .valueOf(org.apache.hadoop.hbase.util.Bytes.toString(currentStateValue));
+        }
+        Put put = new Put(result.getRow());
+        put.addColumn(HConstants.CATALOG_FAMILY, HConstants.STATE_QUALIFIER,
+            org.apache.hadoop.hbase.util.Bytes.toBytes(newState.name()));
+        table.put(put);
+        System.out.println(
+            "Changed region " + regionInfo + " STATE from " + currentState + " to " + newState);
+        return EXIT_SUCCESS;
+      }
     }
     return EXIT_FAILURE;
   }
@@ -553,6 +593,26 @@ public class HBCK2 extends Configured implements org.apache.hadoop.util.Tool {
     writer.println("   Returns whatever the previous table state was.");
   }
 
+  private static void usageSetTableRegionsState(PrintWriter writer) {
+    writer.println(" " + SET_TABLE_REGIONS_STATE + " <TABLENAME> <STATE>");
+    writer.println("   Possible table regions states:");
+    writer.println("    OFFLINE, OPENING, OPEN, CLOSING, CLOSED, SPLITTING, SPLIT,");
+    writer.println("    FAILED_OPEN, FAILED_CLOSE, MERGING, MERGED, SPLITTING_NEW,");
+    writer.println("    MERGING_NEW, ABNORMALLY_CLOSED");
+    writer.println("   WARNING: This is a very risky option intended for use as last resort.");
+    writer.println("   Example scenarios include unassigns/assigns that can't move forward");
+    writer.println("   because region is in an inconsistent state in 'hbase:meta'. For");
+    writer.println("   example, the 'unassigns' command can only proceed if passed a region");
+    writer.println("   in one of the following states: SPLITTING|SPLIT|MERGING|OPEN|CLOSING");
+    writer.println("   Before manually setting a region state with this command, please");
+    writer.println("   certify that this region is not being handled by a running procedure,");
+    writer.println("   such as 'assign' or 'split'. You can get a view of running procedures");
+    writer.println("   in the hbase shell using the 'list_procedures' command. An example");
+    writer.println("   setting region 'de00010733901a05f5a2a3a382e27dd4' to CLOSING:");
+    writer.println("     $ HBCK2 setRegionState de00010733901a05f5a2a3a382e27dd4 CLOSING");
+    writer.println("   Returns \"0\" if region state changed and \"1\" otherwise.");
+  }
+
   private static void usageScheduleRecoveries(PrintWriter writer) {
     writer.println(" " + SCHEDULE_RECOVERIES + " <SERVERNAME>...");
     writer.println("   Schedule ServerCrashProcedure(SCP) for list of RegionServers. Format");
@@ -830,6 +890,17 @@ public class HBCK2 extends Configured implements org.apache.hadoop.util.Tool {
           return EXIT_FAILURE;
         }
         break;
+
+      case SET_TABLE_REGIONS_STATE:
+        if (commands.length < 3) {
+          showErrorMessage(command + " takes tablename and state arguments: e.g. user CLOSED");
+          return EXIT_FAILURE;
+        }
+        RegionState.State rstate = RegionState.State.valueOf(commands[2]);
+        try (ClusterConnection connection = connect()) {
+          checkHBCKSupport(connection, command);
+          return setTableRegionsState(connection, TableName.valueOf(commands[1]), rstate);
+        }
 
       default:
         showErrorMessage("Unsupported command: " + command);
