@@ -202,12 +202,14 @@ public class HBCK2 extends Configured implements org.apache.hadoop.util.Tool {
           currentState = RegionState.State
               .valueOf(org.apache.hadoop.hbase.util.Bytes.toString(currentStateValue));
         }
-        Put put = new Put(result.getRow());
-        put.addColumn(HConstants.CATALOG_FAMILY, HConstants.STATE_QUALIFIER,
-            org.apache.hadoop.hbase.util.Bytes.toBytes(newState.name()));
-        table.put(put);
-        System.out.println(
-            "Changed region " + regionInfo + " STATE from " + currentState + " to " + newState);
+        if (newState != currentState) {
+          Put put = new Put(result.getRow());
+          put.addColumn(HConstants.CATALOG_FAMILY, HConstants.STATE_QUALIFIER,
+              org.apache.hadoop.hbase.util.Bytes.toBytes(newState.name()));
+          table.put(put);
+          System.out.println(
+              "Changed region " + regionInfo + " STATE from " + currentState + " to " + newState);
+        }
       }
     }
     return EXIT_SUCCESS;
