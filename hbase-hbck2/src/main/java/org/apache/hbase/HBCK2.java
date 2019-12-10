@@ -208,10 +208,9 @@ public class HBCK2 extends Configured implements org.apache.hadoop.util.Tool {
         table.put(put);
         System.out.println(
             "Changed region " + regionInfo + " STATE from " + currentState + " to " + newState);
-        return EXIT_SUCCESS;
       }
     }
-    return EXIT_FAILURE;
+    return EXIT_SUCCESS;
   }
 
   Map<TableName,List<Path>> reportTablesWithMissingRegionsInMeta(String... nameSpaceOrTable)
